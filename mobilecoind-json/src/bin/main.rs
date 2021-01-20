@@ -124,10 +124,15 @@ fn add_monitor(
     account_key.set_view_private_key(view_private_key);
     account_key.set_spend_private_key(spend_private_key);
 
+    let mut spend_public_key = CompressedRistretto::new();
+    spend_public_key.set_data(hex::decode(&monitor.spend_public_key).map_err(|err| format!("{}", err))?);
+
     let mut req = mc_mobilecoind_api::AddMonitorRequest::new();
     req.set_account_key(account_key);
     req.set_first_subaddress(monitor.first_subaddress);
     req.set_num_subaddresses(monitor.num_subaddresses);
+    req.set_only_public(monitor.only_public);
+    req.set_spend_public_key(spend_public_key);
     req.set_first_block(0);
 
     let monitor_response = state
@@ -507,6 +512,61 @@ fn generate_request_code_transaction(
     Ok(Json(JsonCreateTxProposalResponse::from(&resp)))
 }
 
+/// Creates unsigned transaction
+#[post(
+"/unsigned_tx",
+format = "json",
+data = "<request>"
+)]
+fn generate_unsigned_tx(
+    state: rocket::State<State>,
+    request: Json<JsonCreateUnsignedTxRequest>,
+) -> Result<Json<JsonCreateUnsignedTxResponse>, String> {
+    let mut view_private_key = RistrettoPrivate::new();
+    view_private_key.set_data(
+        hex::decode(&request.view_private_key)
+            .map_err(|err| format!("Failed to decode hex key: {}", err))?,
+    );
+
+    let change_address = PublicAddress::try_from(&request.change_address)?;
+
+    let public_address = PublicAddress::try_from(&request.transfer.receiver)?;
+
+    // Generate an outlay
+    let mut outlay = mc_mobilecoind_api::Outlay::new();
+    outlay.set_receiver(public_address);
+    outlay.set_value(
+        request
+            .transfer
+            .value
+            .parse::<u64>()
+            .map_err(|err| format!("Failed to parse amount: {}", err))?,
+    );
+
+    let inputs: Vec<mc_mobilecoind_api::UnspentTxOut> = request
+        .input_list
+        .iter()
+        .map(|input| {
+            mc_mobilecoind_api::UnspentTxOut::try_from(input)
+                .map_err(|err| format!("Failed to convert input: {}", err))
+        })
+        .collect::<Result<_, String>>()?;
+
+    // Get a tx proposal
+    let mut req = mc_mobilecoind_api::GenerateUnsignedTxRequest::new();
+    req.set_view_private_key(view_private_key);
+    req.set_change_address(change_address);
+    req.set_input_list(RepeatedField::from_vec(inputs));
+    req.set_outlay_list(RepeatedField::from_vec(vec![outlay]));
+
+    let resp = state
+        .mobilecoind_api_client
+        .generate_unsigned_tx(&req)
+        .map_err(|err| format!("Failed to generate unsigned tx: {}", err))?;
+
+    Ok(Json(JsonCreateUnsignedTxResponse::from(&resp)))
+}
+
 /// Submit a prepared TxProposal
 #[post("/submit-tx", format = "json", data = "<proposal>")]
 fn submit_tx(
@@ -717,6 +777,7 @@ fn main() {
                 build_and_submit,
                 pay_address_code,
                 generate_request_code_transaction,
+                generate_unsigned_tx,
                 submit_tx,
                 check_transfer_status,
                 check_receiver_transfer_status,

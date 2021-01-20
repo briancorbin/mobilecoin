@@ -329,6 +329,7 @@ mount_from = top_level
 docker_run = ["docker",
               "run",
               # container doesn't know mount_point so we have to set this
+              "-p", "4444:4444",
               "--env", "CARGO_HOME=" + mount_point + "/cargo",
               "--volume", mount_from + ":" + mount_point,
               "--workdir", workdir]

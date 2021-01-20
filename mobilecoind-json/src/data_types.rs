@@ -66,6 +66,8 @@ pub struct JsonMonitorRequest {
     pub account_key: JsonAccountKeyResponse,
     pub first_subaddress: u64,
     pub num_subaddresses: u64,
+    pub only_public: bool,
+    pub spend_public_key: String,
 }
 
 #[derive(Serialize, Default, Debug)]
@@ -892,6 +894,88 @@ impl TryFrom<&JsonTx> for Tx {
     }
 }
 
+#[derive(Serialize, Deserialize, Default, Debug)]
+pub struct JsonInputCredentials {
+    pub ring: Vec<JsonTxOut>,
+    pub membership_proofs: Vec<JsonTxOutMembershipProof>,
+    pub real_index: u64,
+    pub onetime_private_key: String,
+    pub real_output_public_key: String,
+    pub view_private_key: String,
+}
+
+impl From<&mc_api::external::SerializableInputCredentials> for JsonInputCredentials {
+    fn from(src: &mc_api::external::SerializableInputCredentials) -> Self {
+        let ring: Vec<JsonTxOut> = src
+            .get_ring()
+            .iter()
+            .map(JsonTxOut::from)
+            .collect();
+
+        let membership_proofs: Vec<JsonTxOutMembershipProof> = src
+            .get_membership_proofs()
+            .iter()
+            .map(JsonTxOutMembershipProof::from)
+            .collect();
+        Self {
+            ring,
+            membership_proofs,
+            real_index: src.get_real_index(),
+            onetime_private_key: hex::encode(src.get_onetime_private_key().get_data()),
+            real_output_public_key: hex::encode(src.get_real_output_public_key().get_data()),
+            view_private_key: hex::encode(src.get_view_private_key().get_data()),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Default, Debug)]
+pub struct JsonOutputsAndSharedSecrets {
+    pub tx_out: JsonTxOut,
+    pub ristretto_public: String,
+}
+
+impl From<&mc_api::external::OutputsAndSharedSecrets> for JsonOutputsAndSharedSecrets {
+    fn from(src: &mc_api::external::OutputsAndSharedSecrets) -> Self {
+        Self {
+            tx_out: src.get_tx_out().into(),
+            ristretto_public: hex::encode(src.get_ristretto_public().get_data()),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Default, Debug)]
+pub struct JsonUnsignedTx {
+    pub input_credentials: Vec<JsonInputCredentials>,
+    pub outputs_and_shared_secrets: Vec<JsonOutputsAndSharedSecrets>,
+    pub fee: u64,
+    pub tombstone_block: u64,
+    pub outlay_confirmation_numbers: Vec<Vec<u8>>,
+}
+
+impl From<&mc_api::external::UnsignedTx> for JsonUnsignedTx {
+    fn from(src: &mc_api::external::UnsignedTx) -> Self {
+        let input_credentials: Vec<JsonInputCredentials> = src
+            .get_input_credentials()
+            .iter()
+            .map(JsonInputCredentials::from)
+            .collect();
+
+        let outputs_and_shared_secrets: Vec<JsonOutputsAndSharedSecrets> = src
+            .get_outputs_and_shared_secrets()
+            .iter()
+            .map(JsonOutputsAndSharedSecrets::from)
+            .collect();
+
+        Self {
+            input_credentials,
+            outputs_and_shared_secrets,
+            fee: src.get_fee(),
+            tombstone_block: src.get_tombstone_block(),
+            outlay_confirmation_numbers: src.get_outlay_confirmation_numbers().to_vec(),
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize, Default, Debug)]
 pub struct JsonTxProposal {
     pub input_list: Vec<JsonUnspentTxOut>,
@@ -965,6 +1049,27 @@ impl TryFrom<&JsonTxProposal> for mc_mobilecoind_api::TxProposal {
 pub struct JsonCreateTxProposalRequest {
     pub input_list: Vec<JsonUnspentTxOut>,
     pub transfer: JsonParseRequestCodeResponse,
+}
+
+#[derive(Deserialize, Serialize, Default, Debug)]
+pub struct JsonCreateUnsignedTxRequest {
+    pub input_list: Vec<JsonUnspentTxOut>,
+    pub transfer: JsonParseRequestCodeResponse,
+    pub change_address: JsonPublicAddress,
+    pub view_private_key: String,
+}
+
+#[derive(Deserialize, Serialize, Default, Debug)]
+pub struct JsonCreateUnsignedTxResponse {
+    pub unsigned_tx: JsonUnsignedTx,
+}
+
+impl From<&mc_mobilecoind_api::GenerateUnsignedTxResponse> for JsonCreateUnsignedTxResponse {
+    fn from(src: &mc_mobilecoind_api::GenerateUnsignedTxResponse) -> Self {
+        Self {
+            unsigned_tx: src.get_unsigned_tx().into(),
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Default, Debug)]

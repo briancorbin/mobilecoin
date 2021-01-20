@@ -15,6 +15,7 @@ use mc_common::{
 use mc_crypto_digestible::{Digestible, MerlinTranscript};
 use mc_util_serial::Message;
 use std::{convert::TryFrom, ops::Range, sync::Arc};
+use mc_crypto_keys::CompressedRistrettoPublic;
 
 // LMDB Database Names
 pub const MONITOR_ID_TO_MONITOR_DATA_DB_NAME: &str =
@@ -46,6 +47,14 @@ pub struct MonitorData {
     /// Optional monitor name.
     #[prost(string, tag = "6")]
     pub name: String,
+
+    /// Optional monitor with spend_public.
+    #[prost(bool, tag = "7")]
+    pub only_public: bool,
+
+    /// Optional monitor with spend_public_key.
+    #[prost(message, required, tag = "8")]
+    pub spend_public_key: CompressedRistrettoPublic
 }
 
 impl MonitorData {
@@ -55,6 +64,8 @@ impl MonitorData {
         num_subaddresses: u64,
         first_block: u64,
         name: &str,
+        only_public: bool,
+        spend_public_key: CompressedRistrettoPublic,
     ) -> Result<Self, Error> {
         if num_subaddresses == 0 {
             return Err(Error::InvalidArgument(
@@ -71,6 +82,8 @@ impl MonitorData {
             // The next block we need to sync is our first block.
             next_block: first_block,
             name: name.to_owned(),
+            only_public,
+            spend_public_key
         })
     }
 

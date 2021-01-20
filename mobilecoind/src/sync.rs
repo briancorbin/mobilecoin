@@ -32,7 +32,7 @@ use mc_crypto_keys::RistrettoPublic;
 use mc_ledger_db::{Ledger, LedgerDB};
 use mc_transaction_core::{
     get_tx_out_shared_secret,
-    onetime_keys::{recover_onetime_private_key, recover_public_subaddress_spend_key},
+    onetime_keys::{recover_onetime_private_key, recover_public_subaddress_spend_key, view_key_matches_output},
     ring_signature::KeyImage,
     tx::TxOut,
 };
@@ -44,6 +44,7 @@ use std::{
     },
     thread,
 };
+use mc_account_keys::ViewKey;
 
 ///  The maximal number of blocks a worker thread would process at once.
 const MAX_BLOCKS_PROCESSING_CHUNK_SIZE: usize = 5;
@@ -340,7 +341,15 @@ fn match_tx_outs_into_utxos(
     logger: &Logger,
 ) -> Result<Vec<UnspentTxOut>, Error> {
     let account_key = &monitor_data.account_key;
-    let view_key = account_key.view_key();
+    // is this monitor is only public then take spend_public_key as spend_private_key. There will be only one address to monitor
+    let view_key = if monitor_data.only_public {
+        ViewKey {
+            spend_public_key: RistrettoPublic::try_from(&monitor_data.spend_public_key)?,
+            view_private_key: account_key.view_private_key().clone(),
+        }
+    } else {
+        account_key.view_key()
+    };
     let mut results = Vec::new();
 
     for tx_out in outputs {
@@ -348,57 +357,81 @@ fn match_tx_outs_into_utxos(
         let tx_out_target_key = RistrettoPublic::try_from(&tx_out.target_key)?;
         let tx_public_key = RistrettoPublic::try_from(&tx_out.public_key)?;
 
-        let subaddress_spk = SubaddressSPKId::from(&recover_public_subaddress_spend_key(
-            &view_key.view_private_key,
-            &tx_out_target_key,
-            &tx_public_key,
-        ));
+        if monitor_data.only_public {
+            if view_key_matches_output(&view_key, &tx_out_target_key, &tx_public_key) {
+                let shared_secret =
+                    get_tx_out_shared_secret(account_key.view_private_key(), &tx_public_key);
 
-        // See if it matches any of our monitors.
-        let subaddress_id = match mobilecoind_db.get_subaddress_id_by_spk(&subaddress_spk) {
-            Ok(data) => {
-                log::trace!(
-                    logger,
-                    "matched subaddress index {} for monitor_id {}",
-                    data.index,
-                    data.monitor_id,
-                );
+                let (value, _blinding) = tx_out
+                    .amount
+                    .get_value(&shared_secret)
+                    .expect("Malformed amount"); // TODO
 
-                data
+                // we will take key image from tx public key (to solve current issue with storage)
+                let key_image = KeyImage::from(tx_public_key.to_bytes());
+
+                results.push(UnspentTxOut {
+                    tx_out: tx_out.clone(),
+                    subaddress_index: 0,
+                    key_image,
+                    value,
+                    attempted_spend_height: 0,
+                    attempted_spend_tombstone: 0,
+                });
             }
-            Err(Error::SubaddressSPKNotFound) => continue,
-            Err(err) => {
-                return Err(err);
-            }
-        };
+        } else {
+            let subaddress_spk = SubaddressSPKId::from(&recover_public_subaddress_spend_key(
+                &view_key.view_private_key,
+                &tx_out_target_key,
+                &tx_public_key,
+            ));
 
-        // Sanity - we should only get a match for our own monitor id.
-        assert_eq!(monitor_id, &subaddress_id.monitor_id);
+            // See if it matches any of our monitors.
+            let subaddress_id = match mobilecoind_db.get_subaddress_id_by_spk(&subaddress_spk) {
+                Ok(data) => {
+                    log::trace!(
+                        logger,
+                        "matched subaddress index {} for monitor_id {}",
+                        data.index,
+                        data.monitor_id,
+                    );
 
-        let shared_secret =
-            get_tx_out_shared_secret(account_key.view_private_key(), &tx_public_key);
+                    data
+                }
+                Err(Error::SubaddressSPKNotFound) => continue,
+                Err(err) => {
+                    return Err(err);
+                }
+            };
 
-        let (value, _blinding) = tx_out
-            .amount
-            .get_value(&shared_secret)
-            .expect("Malformed amount"); // TODO
+            // Sanity - we should only get a match for our own monitor id.
+            assert_eq!(monitor_id, &subaddress_id.monitor_id);
 
-        let onetime_private_key = recover_onetime_private_key(
-            &tx_public_key,
-            account_key.view_private_key(),
-            &account_key.subaddress_spend_private(subaddress_id.index),
-        );
+            let shared_secret =
+                get_tx_out_shared_secret(account_key.view_private_key(), &tx_public_key);
 
-        let key_image = KeyImage::from(&onetime_private_key);
+            let (value, _blinding) = tx_out
+                .amount
+                .get_value(&shared_secret)
+                .expect("Malformed amount"); // TODO
 
-        results.push(UnspentTxOut {
-            tx_out: tx_out.clone(),
-            subaddress_index: subaddress_id.index,
-            key_image,
-            value,
-            attempted_spend_height: 0,
-            attempted_spend_tombstone: 0,
-        });
+            let onetime_private_key = recover_onetime_private_key(
+                &tx_public_key,
+                account_key.view_private_key(),
+                &account_key.subaddress_spend_private(subaddress_id.index),
+            );
+
+            let key_image = KeyImage::from(&onetime_private_key);
+
+            results.push(UnspentTxOut {
+                tx_out: tx_out.clone(),
+                subaddress_index: subaddress_id.index,
+                key_image,
+                value,
+                attempted_spend_height: 0,
+                attempted_spend_tombstone: 0,
+            });
+        }
     }
 
     Ok(results)
