@@ -1082,7 +1082,7 @@ impl<T: UserTxConnection + 'static, FPR: FogPubkeyResolver + Send + Sync + 'stat
                 tombstone_block,
             )?;
 
-            tx_builder
+            let (_tx_out, confirmation_number) = tx_builder
                 .add_output(
                     change,
                     &change_public_address,
@@ -1092,6 +1092,8 @@ impl<T: UserTxConnection + 'static, FPR: FogPubkeyResolver + Send + Sync + 'stat
                 .map_err(|err| {
                     Error::TxBuildError(format!("failed adding output (change): {}", err))
                 })?;
+
+            outlay_confirmation_numbers.push(confirmation_number.to_vec());
         }
 
         let outputs_and_shared_secrets: Vec<OutputsAndSharedSecrets> = tx_builder

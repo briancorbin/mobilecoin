@@ -33,7 +33,7 @@ blake2 = { version = "0.9", default-features = false }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 rand = { version = "0.7", features =["wasm-bindgen"] }
 hex = "0.4"
-wasm-bindgen = "^0.2.69"
+wasm-bindgen = { version = "=0.2.69", features = ["serde-serialize"] }
 serde = "1.0"
 serde_derive = "1.0"
 serde-wasm-bindgen = "0.1.3"

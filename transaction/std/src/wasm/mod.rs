@@ -1,6 +1,5 @@
 use std::{convert::TryFrom};
 
-use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::*;
 
 use data_types::{JsonSigningData, JsonUnsignedTx, JsonTx, JsonTxPrefix};
@@ -8,7 +7,10 @@ use mc_crypto_keys::{RistrettoPrivate, RistrettoPublic};
 use mc_transaction_core::tx::{TxOut, TxOutMembershipProof};
 
 use crate::{InputCredentials, TransactionBuilder};
-use mc_account_keys::{PublicAddress};
+use mc_account_keys::{AccountKey, PublicAddress, RootIdentity};
+use mc_util_from_random::FromRandom;
+
+use serde::{Deserialize, Serialize};
 
 mod data_types;
 
@@ -18,6 +20,14 @@ pub struct Transaction {
     outputs_and_shared_secrets: Vec<(TxOut, RistrettoPublic)>,
     tombstone_block: u64,
     fee: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+pub struct SingleKey {
+    pub view_private: String,
+    pub sub_view_public: String,
+    pub sub_spend_public: String,
+    pub sub_spend_private: String,
 }
 
 #[wasm_bindgen]
@@ -51,11 +61,58 @@ pub fn get_address(view_public_key: &str, spend_public_key: &str) -> Result<Stri
 }
 
 #[wasm_bindgen]
+pub fn generate_address() -> Result<JsValue, JsValue> {
+    let mut rng = rand::thread_rng();
+    let root_id = RootIdentity::from_random(&mut rng);
+
+    let account_key = AccountKey::from(&root_id);
+
+    let view_private = account_key.view_private_key();
+
+    let subaddress = account_key.subaddress(0);
+    let sub_view_public = subaddress.view_public_key();
+    let sub_spend_public = subaddress.spend_public_key();
+    let sub_spend_private = account_key.subaddress_spend_private(0);
+
+    let params = SingleKey {
+        view_private: hex::encode(view_private.to_bytes()),
+        sub_view_public: hex::encode(sub_view_public.to_bytes()),
+        sub_spend_public: hex::encode(sub_spend_public.to_bytes()),
+        sub_spend_private: hex::encode(sub_spend_private.to_bytes())
+    };
+
+    let params_value = JsValue::from_serde(&params).map_err(|e| {
+        JsValue::from(format!(
+            "Error converting constructor parameters to json object: {}",
+            e
+        ))
+    })?;
+
+    Ok(params_value)
+}
+
+#[wasm_bindgen]
+pub fn get_public_address(private_key: &str) -> Result<String, JsValue> {
+    let hex_view = hex::decode(private_key)
+        .map_err(|err| format!("Failed to parse private key: {}", err))?;
+
+    let v: &[u8] = &hex_view;
+
+    let private = RistrettoPrivate::try_from(v)
+        .map_err(|err| format!("Failed to parse private key: {:?}", err))?;
+
+    let public = RistrettoPublic::from(&private);
+
+    Ok(hex::encode(public.to_bytes()))
+}
+
+#[wasm_bindgen]
 impl Transaction {
     #[wasm_bindgen(constructor)]
-    pub fn new(s: &str) -> Result<Transaction, JsValue> {
-        let unsigned_tx: JsonUnsignedTx = serde_json::from_str(s)
-            .map_err(|err| format!("Failed to parse unsigned_tx: {}", err))?;
+    pub fn new(unsigned_tx_js: JsValue) -> Result<Transaction, JsValue> {
+        let unsigned_tx: JsonUnsignedTx = unsigned_tx_js
+            .into_serde()
+            .map_err(|e| JsValue::from(format!("Error parsing parameters: {}", e)))?;
 
         // convert to proto
         let proto_unsigned_tx = mc_api::external::UnsignedTx::try_from(&unsigned_tx)
@@ -139,7 +196,7 @@ impl Transaction {
     }
 
     #[wasm_bindgen(js_name = "get_signing_data")]
-    pub fn get_signing_data(&self) -> Result<String, JsValue> {
+    pub fn get_signing_data(&self) -> Result<JsValue, JsValue> {
         let mut builder = TransactionBuilder::new();
 
         builder.set_fee(self.fee);
@@ -151,14 +208,18 @@ impl Transaction {
             .map_err(|err| format!("Error on get signing data: {:?}", err))
             .map(|data| JsonSigningData::from(data))?;
 
-        let result = serde_json::to_string(&sign_data)
-            .map_err(|err| format!("Failed to serialize signing data to json: {}", err))?;
+        let result = JsValue::from_serde(&sign_data).map_err(|e| {
+            JsValue::from(format!(
+                "Error converting constructor parameters to json object: {}",
+                e
+            ))
+        })?;
 
         Ok(result)
     }
 
     #[wasm_bindgen(js_name = get_tx_prefix)]
-    pub fn get_tx_prefix(&self) -> Result<String, JsValue> {
+    pub fn get_tx_prefix(&self) -> Result<JsValue, JsValue> {
         let mut builder = TransactionBuilder::new();
 
         builder.set_fee(self.fee);
@@ -173,14 +234,18 @@ impl Transaction {
 
         let json = JsonTxPrefix::from(&proto);
 
-        let result = serde_json::to_string(&json)
-            .map_err(|err| format!("Failed to serialize signed tx: {}", err))?;
+        let result = JsValue::from_serde(&json).map_err(|e| {
+            JsValue::from(format!(
+                "Error converting constructor parameters to json object: {}",
+                e
+            ))
+        })?;
 
         Ok(result)
     }
 
     #[wasm_bindgen(js_name = sign)]
-    pub fn sign(&self, spend_private_key: &str) -> Result<String, JsValue> {
+    pub fn sign(&self, spend_private_key: &str) -> Result<JsValue, JsValue> {
         let p = hex::decode(spend_private_key)
             .map_err(|err| format!("Failed to decode private key: {}", err))?;
 
@@ -205,8 +270,12 @@ impl Transaction {
 
         let json = JsonTx::from(&proto);
 
-        let result = serde_json::to_string(&json)
-            .map_err(|err| format!("Failed to serialize signed tx: {}", err))?;
+        let result = JsValue::from_serde(&json).map_err(|e| {
+            JsValue::from(format!(
+                "Error converting constructor parameters to json object: {}",
+                e
+            ))
+        })?;
 
         Ok(result)
     }
