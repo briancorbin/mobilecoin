@@ -126,6 +126,8 @@ pub struct SigningData {
     /// output_values_and_blindings
     pub output_values_and_blindings: Vec<OutputValueAndBlinding>,
 
+    pub input_values_and_blindings: Vec<OutputValueAndBlinding>,
+
     /// output_values_and_blindings
     pub fee: u64,
 }

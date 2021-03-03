@@ -302,16 +302,18 @@ impl TransactionBuilder {
             .collect();
 
         // One-time private key, amount value, and amount blinding for each real input.
-        let mut input_secrets: Vec<(RistrettoPrivate, u64, Scalar)> = Vec::new();
+        let mut input_values_and_blindings: Vec<OutputValueAndBlinding> = Vec::new();
         for input_credential in &self.input_credentials {
-            let onetime_private_key = input_credential.onetime_private_key;
             let amount = &input_credential.ring[input_credential.real_index].amount;
             let shared_secret = create_shared_secret(
                 &input_credential.real_output_public_key,
                 &input_credential.view_private_key,
             );
             let (value, blinding) = amount.get_value(&shared_secret)?;
-            input_secrets.push((onetime_private_key, value, blinding));
+            input_values_and_blindings.push(OutputValueAndBlinding {
+                value,
+                blinding
+            });
         }
 
         let message = tx_prefix.hash().0;
@@ -323,6 +325,7 @@ impl TransactionBuilder {
             rings,
             real_input_indices,
             output_values_and_blindings,
+            input_values_and_blindings,
             fee
         })
     }

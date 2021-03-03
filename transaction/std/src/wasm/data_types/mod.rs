@@ -306,6 +306,7 @@ pub struct JsonSigningData {
     pub rings: Vec<Vec<JsonRing>>,
     pub real_input_indices: Vec<u64>,
     pub output_values_and_blindings: Vec<JsonOutputsValuesAndBlindings>,
+    pub input_values_and_blindings: Vec<JsonOutputsValuesAndBlindings>,
     pub fee: u64,
 }
 
@@ -348,11 +349,20 @@ impl From<SigningData> for JsonSigningData {
             })
             .collect();
 
+        let input_values_and_blindings = src.input_values_and_blindings
+            .iter()
+            .map(|output| JsonOutputsValuesAndBlindings {
+                value: output.value,
+                blinding: hex::encode(output.blinding.to_bytes())
+            })
+            .collect();
+
         Self {
             message: hex::encode(src.message),
             rings,
             real_input_indices,
             output_values_and_blindings,
+            input_values_and_blindings,
             fee: src.fee
         }
     }
