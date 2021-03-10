@@ -305,19 +305,30 @@ pub struct JsonSigningData {
     pub message: String,
     pub rings: Vec<Vec<JsonRing>>,
     pub real_input_indices: Vec<u64>,
-    pub output_values_and_blindings: Vec<JsonOutputsValuesAndBlindings>,
-    pub input_values_and_blindings: Vec<JsonOutputsValuesAndBlindings>,
-    pub fee: u64,
+    pub pseudo_output_blindings: Vec<String>,
+    pub input_values_and_blindings: Vec<JsonInputValuesAndBlindings>,
+    pub pseudo_output_commitments: Vec<String>,
+    pub range_proof_bytes: String,
+}
+
+#[derive(Deserialize, Serialize, Default, Debug)]
+pub struct JsonVerifySignature {
+    pub message: String,
+    pub ring: Vec<JsonRing>,
+    pub output_commitment: String,
+    pub c_zero: String,
+    pub responses: Vec<String>,
+    pub key_image: String,
 }
 
 #[derive(Deserialize, Serialize, Default, Debug)]
 pub struct JsonRing {
-    compressed_ristretto_public: String,
-    compressed_commitment: String,
+    pub compressed_ristretto_public: String,
+    pub compressed_commitment: String,
 }
 
 #[derive(Deserialize, Serialize, Default, Debug)]
-pub struct JsonOutputsValuesAndBlindings {
+pub struct JsonInputValuesAndBlindings {
     value: u64,
     blinding: String,
 }
@@ -328,9 +339,9 @@ impl From<SigningData> for JsonSigningData {
             .iter()
             .map(|ring| ring
                 .iter()
-                .map(|r| JsonRing {
-                    compressed_ristretto_public: hex::encode(r.compressed_ristretto_public.as_bytes()),
-                    compressed_commitment: hex::encode(r.compressed_commitment.point.to_bytes()),
+                .map(|(compressed_ristretto_public, compressed_commitment)| JsonRing {
+                    compressed_ristretto_public: hex::encode(compressed_ristretto_public.as_bytes()),
+                    compressed_commitment: hex::encode(compressed_commitment.point.to_bytes()),
                 })
                 .collect()
             )
@@ -341,29 +352,34 @@ impl From<SigningData> for JsonSigningData {
             .map(|indic| indic.clone() as u64)
             .collect();
 
-        let output_values_and_blindings = src.output_values_and_blindings
+        let pseudo_output_blindings = src.pseudo_output_blindings
             .iter()
-            .map(|output| JsonOutputsValuesAndBlindings {
-                value: output.value,
-                blinding: hex::encode(output.blinding.to_bytes())
-            })
+            .map(|output| hex::encode(output.to_bytes()))
             .collect();
 
         let input_values_and_blindings = src.input_values_and_blindings
             .iter()
-            .map(|output| JsonOutputsValuesAndBlindings {
-                value: output.value,
-                blinding: hex::encode(output.blinding.to_bytes())
+            .map(|(value, blinding)| JsonInputValuesAndBlindings {
+                value: value.clone(),
+                blinding: hex::encode(blinding.to_bytes())
             })
             .collect();
+
+        let pseudo_output_commitments = src.pseudo_output_commitments
+            .iter()
+            .map(|x| hex::encode(x.point.to_bytes()))
+            .collect();
+
+        let range_proof_bytes = hex::encode(src.range_proof_bytes);
 
         Self {
             message: hex::encode(src.message),
             rings,
             real_input_indices,
-            output_values_and_blindings,
+            pseudo_output_blindings,
             input_values_and_blindings,
-            fee: src.fee
+            pseudo_output_commitments,
+            range_proof_bytes
         }
     }
 }

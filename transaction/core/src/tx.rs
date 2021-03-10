@@ -115,21 +115,22 @@ pub struct Tx {
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SigningData {
     /// Transaction message
-    pub message: [u8; 32],
+    pub message: Vec<u8>,
 
     /// rings
-    pub rings: Vec<Vec<Ring>>,
+    pub rings: Vec<Vec<(CompressedRistrettoPublic, CompressedCommitment)>>,
 
     /// rings
     pub real_input_indices: Vec<usize>,
 
-    /// output_values_and_blindings
-    pub output_values_and_blindings: Vec<OutputValueAndBlinding>,
-
-    pub input_values_and_blindings: Vec<OutputValueAndBlinding>,
+    pub input_values_and_blindings: Vec<(u64, Scalar)>,
 
     /// output_values_and_blindings
-    pub fee: u64,
+    pub pseudo_output_blindings: Vec<Scalar>,
+
+    pub pseudo_output_commitments: Vec<CompressedCommitment>,
+
+    pub range_proof_bytes: Vec<u8>,
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Digestible)]

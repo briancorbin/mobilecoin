@@ -14,8 +14,8 @@ use mc_transaction_core::{
     encrypted_fog_hint::EncryptedFogHint,
     fog_hint::FogHint,
     onetime_keys::create_shared_secret,
-    ring_signature::SignatureRctBulletproofs,
-    tx::{Tx, SigningData, TxIn, TxOut, TxOutConfirmationNumber, TxPrefix, Ring, OutputValueAndBlinding},
+    tx::{Tx, SigningData, TxIn, TxOut, TxOutConfirmationNumber, TxPrefix},
+    ring_signature::{SignatureRctBulletproofs},
     CompressedCommitment,
 };
 use mc_util_from_random::FromRandom;
@@ -226,7 +226,7 @@ impl TransactionBuilder {
     }
 
     /// Consume the builder and return the transaction.
-    pub fn get_signing_data(mut self) -> Result<SigningData, TxBuilderError> {
+    pub fn get_signing_data<T: RngCore + CryptoRng>(mut self, rng: &mut T) -> Result<SigningData, TxBuilderError> {
         if self.input_credentials.is_empty() {
             return Err(TxBuilderError::NoInputs);
         }
@@ -262,7 +262,7 @@ impl TransactionBuilder {
         self.outputs_and_shared_secrets
             .sort_by(|(a, _), (b, _)| a.public_key.cmp(&b.public_key));
 
-        let output_values_and_blindings: Vec<OutputValueAndBlinding> = self
+        let output_values_and_blindings: Vec<(u64, Scalar)> = self
             .outputs_and_shared_secrets
             .iter()
             .map(|(tx_out, shared_secret)| {
@@ -270,10 +270,7 @@ impl TransactionBuilder {
                 let (value, blinding) = amount
                     .get_value(shared_secret)
                     .expect("TransactionBuilder created an invalid Amount");
-                OutputValueAndBlinding {
-                    value,
-                    blinding
-                }
+                (value, blinding)
             })
             .collect();
 
@@ -282,15 +279,12 @@ impl TransactionBuilder {
 
         let tx_prefix = TxPrefix::new(inputs, outputs, self.fee, self.tombstone_block);
 
-        let mut rings: Vec<Vec<Ring>> = Vec::new();
+        let mut rings: Vec<Vec<(CompressedRistrettoPublic, CompressedCommitment)>> = Vec::new();
         for input in &tx_prefix.inputs {
-            let ring: Vec<Ring> = input
+            let ring: Vec<(CompressedRistrettoPublic, CompressedCommitment)> = input
                 .ring
                 .iter()
-                .map(|tx_out| Ring {
-                    compressed_ristretto_public: tx_out.target_key,
-                    compressed_commitment: tx_out.amount.commitment
-                })
+                .map(|tx_out| (tx_out.target_key, tx_out.amount.commitment))
                 .collect();
             rings.push(ring);
         }
@@ -302,7 +296,7 @@ impl TransactionBuilder {
             .collect();
 
         // One-time private key, amount value, and amount blinding for each real input.
-        let mut input_values_and_blindings: Vec<OutputValueAndBlinding> = Vec::new();
+        let mut input_secrets: Vec<(u64, Scalar)> = Vec::new();
         for input_credential in &self.input_credentials {
             let amount = &input_credential.ring[input_credential.real_index].amount;
             let shared_secret = create_shared_secret(
@@ -310,23 +304,30 @@ impl TransactionBuilder {
                 &input_credential.view_private_key,
             );
             let (value, blinding) = amount.get_value(&shared_secret)?;
-            input_values_and_blindings.push(OutputValueAndBlinding {
-                value,
-                blinding
-            });
+            input_secrets.push((value, blinding));
         }
 
         let message = tx_prefix.hash().0;
 
-        let fee = self.fee;
+        let signing_data = SignatureRctBulletproofs::get_signing_data(
+            &message,
+            &rings,
+            &real_input_indices,
+            &input_secrets,
+            &output_values_and_blindings,
+            self.fee,
+            true,
+            rng
+        )?;
 
         Ok(SigningData {
-            message,
+            message: signing_data.extended_message,
             rings,
             real_input_indices,
-            output_values_and_blindings,
-            input_values_and_blindings,
-            fee
+            input_values_and_blindings: input_secrets,
+            pseudo_output_blindings: signing_data.pseudo_output_blindings,
+            pseudo_output_commitments: signing_data.pseudo_output_commitments,
+            range_proof_bytes: signing_data.range_proof_bytes
         })
     }
 
