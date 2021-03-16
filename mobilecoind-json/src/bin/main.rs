@@ -558,6 +558,7 @@ fn generate_unsigned_tx(
     req.set_change_address(change_address);
     req.set_input_list(RepeatedField::from_vec(inputs));
     req.set_outlay_list(RepeatedField::from_vec(vec![outlay]));
+    req.set_tombstone(request.tombstone);
 
     let resp = state
         .mobilecoind_api_client

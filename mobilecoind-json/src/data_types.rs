@@ -1057,6 +1057,7 @@ pub struct JsonCreateUnsignedTxRequest {
     pub transfer: JsonParseRequestCodeResponse,
     pub change_address: JsonPublicAddress,
     pub view_private_key: String,
+    pub tombstone: u64
 }
 
 #[derive(Deserialize, Serialize, Default, Debug)]
