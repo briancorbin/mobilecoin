@@ -133,7 +133,7 @@ fn add_monitor(
     req.set_num_subaddresses(monitor.num_subaddresses);
     req.set_only_public(monitor.only_public);
     req.set_spend_public_key(spend_public_key);
-    req.set_first_block(0);
+    req.set_first_block(monitor.first_block);
 
     let monitor_response = state
         .mobilecoind_api_client

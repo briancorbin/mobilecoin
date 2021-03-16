@@ -68,6 +68,7 @@ pub struct JsonMonitorRequest {
     pub num_subaddresses: u64,
     pub only_public: bool,
     pub spend_public_key: String,
+    pub first_block: u64,
 }
 
 #[derive(Serialize, Default, Debug)]
