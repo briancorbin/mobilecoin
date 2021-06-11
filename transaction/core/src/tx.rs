@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 use blake2::digest::Update;
 use core::{convert::TryFrom, fmt};
+use curve25519_dalek::scalar::Scalar;
 
 use mc_account_keys::PublicAddress;
 use mc_common::Hash;
@@ -108,6 +109,100 @@ pub struct Tx {
     /// The transaction signature.
     #[prost(message, required, tag = "2")]
     pub signature: SignatureRctBulletproofs,
+}
+
+/// Signing data for external library
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SigningData {
+    /// Transaction message
+    pub message: Vec<u8>,
+
+    /// rings
+    pub rings: Vec<Vec<(CompressedRistrettoPublic, CompressedCommitment)>>,
+
+    /// rings
+    pub real_input_indices: Vec<usize>,
+
+    pub input_values_and_blindings: Vec<(u64, Scalar)>,
+
+    /// output_values_and_blindings
+    pub pseudo_output_blindings: Vec<Scalar>,
+
+    pub pseudo_output_commitments: Vec<CompressedCommitment>,
+
+    pub range_proof_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Digestible)]
+pub struct Ring {
+    pub compressed_ristretto_public: CompressedRistrettoPublic,
+
+    pub compressed_commitment: CompressedCommitment,
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Digestible)]
+pub struct OutputValueAndBlinding {
+    pub value: u64,
+
+    pub blinding: Scalar
+}
+
+/// Data for unsigned tx
+#[derive(Clone, Message)]
+pub struct UnsignedTx {
+    #[prost(message, repeated, tag = "1")]
+    pub input_credentials: Vec<SerializableInputCredentials>,
+
+    #[prost(message, repeated, tag = "2")]
+    pub outputs_and_shared_secrets: Vec<OutputsAndSharedSecrets>,
+
+    #[prost(message, required, tag = "3")]
+    pub tombstone_block: u64,
+
+    #[prost(message, required, tag = "4")]
+    pub fee: u64,
+
+    /// A list of the confirmation numbers, in the same order
+    /// as the outlays.
+    #[prost(bytes, repeated, tag = "5")]
+    pub outlay_confirmation_numbers: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Message)]
+pub struct OutputsAndSharedSecrets {
+    #[prost(message, required, tag = "1")]
+    pub tx_out: TxOut,
+
+    #[prost(message, required, tag = "2")]
+    pub ristretto_public: CompressedRistrettoPublic,
+}
+
+/// Credentials required to construct a ring signature for an input.
+#[derive(Clone, Message)]
+pub struct SerializableInputCredentials {
+    /// A "ring" containing "mixins" and the one "real" TxOut to be spent.
+    #[prost(message, repeated, tag = "1")]
+    pub ring: Vec<TxOut>,
+
+    /// Proof that each TxOut in `ring` is in the ledger.
+    #[prost(message, repeated, tag = "2")]
+    pub membership_proofs: Vec<TxOutMembershipProof>,
+
+    /// Index in `ring` of the "real" output being spent.
+    #[prost(uint64, tag = "3")]
+    pub real_index: u64,
+
+    /// Private key for the "real" output being spent.
+    #[prost(message, required, tag = "4")]
+    pub onetime_private_key: RistrettoPrivate,
+
+    /// Public key of the transaction that created the "real" output being spent.
+    #[prost(message, required, tag = "5")]
+    pub real_output_public_key: CompressedRistrettoPublic,
+
+    /// View private key for the address this input was sent to
+    #[prost(message, required, tag = "6")]
+    pub view_private_key: RistrettoPrivate,
 }
 
 impl fmt::Display for Tx {

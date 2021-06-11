@@ -286,3 +286,50 @@ message VerificationReport {
     /// The raw report body JSON, as a byte sequence
     string http_body = 3;
 }
+
+// Structure used to refer to a prepared transaction
+message UnsignedTx {
+    // List of inputs being spent.
+    repeated SerializableInputCredentials input_credentials = 1;
+
+    // List of outputs being created.
+    // This excludes the fee output.
+    repeated OutputsAndSharedSecrets outputs_and_shared_secrets = 2;
+
+    // The block index at which this transaction is no longer valid.
+    uint64 tombstone_block = 3;
+
+    // Fee paid to the foundation for this transaction
+    uint64 fee = 4;
+
+    /// A list of the confirmation numbers, in the same order
+    /// as the outlays.
+    repeated bytes outlay_confirmation_numbers = 5;
+}
+
+message SerializableInputCredentials {
+    // List of inputs being spent.
+    repeated TxOut ring = 1;
+
+    // List of outputs being created.
+    // This excludes the fee output.
+    repeated TxOutMembershipProof membership_proofs = 2;
+
+    // The actual transaction object.
+    // Together with the private view/spend keys, this structure contains all information in existence about the transaction.
+    uint64 real_index = 3;
+
+    RistrettoPrivate onetime_private_key = 4;
+
+    // Fee paid to the foundation for this transaction
+    CompressedRistretto real_output_public_key = 5;
+
+    // The block index at which this transaction is no longer valid.
+    RistrettoPrivate view_private_key = 6;
+}
+
+message OutputsAndSharedSecrets {
+  TxOut tx_out = 1;
+
+  CompressedRistretto ristretto_public = 2;
+}

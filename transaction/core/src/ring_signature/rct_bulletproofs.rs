@@ -45,6 +45,22 @@ pub struct SignatureRctBulletproofs {
     pub range_proof_bytes: Vec<u8>,
 }
 
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SignatureData {
+    /// Transaction message
+    pub extended_message: Vec<u8>,
+
+    pub pseudo_output_blindings: Vec<Scalar>,
+
+    /// Commitments of value equal to each real input.
+    pub pseudo_output_commitments: Vec<CompressedCommitment>,
+
+    /// Proof that all pseudo_outputs and transaction outputs are in [0, 2^64).
+    /// This contains range_proof.to_bytes(). It is stored this way so that this struct may derive
+    /// Default, which is a requirement for serializing with Prost.
+    pub range_proof_bytes: Vec<u8>,
+}
+
 impl SignatureRctBulletproofs {
     /// Sign.
     ///
@@ -77,6 +93,130 @@ impl SignatureRctBulletproofs {
             true,
             rng,
         )
+    }
+
+    ///
+/// # Arguments
+/// * `message` - The messages to be signed, e.g. Hash(TxPrefix).
+/// * `rings` - One or more rings of one-time addresses and amount commitments.
+/// * `real_input_indices` - The index of the real input in each ring.
+/// * `input_secrets` - One-time private key, amount value, and amount blinding for each real input.
+/// * `output_values_and_blindings` - Value and blinding for each output amount commitment.
+/// * `fee` - Value of the implicit fee output.
+/// * `check_value_is_preserved` - If true, check that the value of inputs equals value of outputs.
+    pub fn get_signing_data<CSPRNG: RngCore + CryptoRng>(
+        message: &[u8; 32],
+        rings: &[Vec<(CompressedRistrettoPublic, CompressedCommitment)>],
+        real_input_indices: &[usize],
+        input_secrets: &[(u64, Scalar)],
+        output_values_and_blindings: &[(u64, Scalar)],
+        fee: u64,
+        check_value_is_preserved: bool,
+        rng: &mut CSPRNG,
+    ) -> Result<SignatureData, Error> {
+        if rings.is_empty() {
+            return Err(Error::NoInputs);
+        }
+        let num_inputs = rings.len();
+        let ring_size = rings[0].len();
+        if ring_size == 0 {
+            return Err(Error::InvalidRingSize(0));
+        }
+
+        // Each ring must have the same size.
+        for ring in rings {
+            if ring.len() != ring_size {
+                return Err(Error::InvalidRingSize(ring.len()));
+            }
+        }
+
+        // `input_secrets` must contain an element for each input.
+        if input_secrets.len() != num_inputs {
+            return Err(Error::InvalidInputSecretsSize(input_secrets.len()));
+        }
+
+        // Each `real_input_index` must be in [0,ring_size - 1].
+        for i in real_input_indices {
+            if *i >= ring_size {
+                return Err(Error::IndexOutOfBounds);
+            }
+        }
+
+        // Blindings for pseudo_outputs. All but the last are random.
+        // Constructing blindings in this way ensures that sum_of_outputs - sum_of_pseudo_outputs = 0
+        // if the sum of outputs and the sum of pseudo_outputs have equal value.
+        let mut pseudo_output_blindings: Vec<Scalar> = Vec::new();
+        for _i in 0..num_inputs - 1 {
+            pseudo_output_blindings.push(Scalar::random(rng));
+        }
+        // The implicit fee output is ommitted because its blinding is zero.
+        let sum_of_output_blindings: Scalar = output_values_and_blindings
+            .iter()
+            .map(|(_, blinding)| blinding)
+            .sum();
+
+        let sum_of_pseudo_output_blindings: Scalar = pseudo_output_blindings.iter().sum();
+        let last_blinding: Scalar = sum_of_output_blindings - sum_of_pseudo_output_blindings;
+        pseudo_output_blindings.push(last_blinding);
+
+        // Create Range proofs for outputs and pseudo-outputs.
+        let pseudo_output_values_and_blindings: Vec<(u64, Scalar)> = input_secrets
+            .iter()
+            .zip(pseudo_output_blindings.iter())
+            .map(|((value, _), blinding)| (*value, *blinding))
+            .collect();
+
+        let (range_proof, commitments) = {
+            let values_and_blindings: Vec<(u64, Scalar)> = pseudo_output_values_and_blindings
+                .iter()
+                .chain(output_values_and_blindings.iter())
+                .map(|(value, blinding)| (*value, *blinding))
+                .collect();
+
+            // The implicit fee output is omitted from the range proof because it is known.
+
+            let (values, blindings): (Vec<_>, Vec<_>) = values_and_blindings.into_iter().unzip();
+            generate_range_proofs(&values, &blindings, rng).map_err(|_e| Error::RangeProofError)?
+        };
+
+        if check_value_is_preserved {
+            let sum_of_output_commitments: RistrettoPoint = output_values_and_blindings
+                .iter()
+                .map(|(value, blinding)| GENERATORS.commit(Scalar::from(*value), *blinding))
+                .sum();
+
+            let sum_of_pseudo_output_commitments: RistrettoPoint = pseudo_output_values_and_blindings
+                .iter()
+                .map(|(value, blinding)| GENERATORS.commit(Scalar::from(*value), *blinding))
+                .sum();
+
+            // The implicit fee output.
+            let fee_commitment = GENERATORS.commit(Scalar::from(fee), *FEE_BLINDING);
+
+            let difference =
+                sum_of_output_commitments + fee_commitment - sum_of_pseudo_output_commitments;
+            if difference != GENERATORS.commit(Scalar::zero(), Scalar::zero()) {
+                return Err(Error::ValueNotConserved);
+            }
+        }
+
+        let pseudo_output_commitments: Vec<CompressedCommitment> = commitments
+            .iter()
+            .take(num_inputs)
+            .map(CompressedCommitment::from)
+            .collect();
+
+        // Extend the message with the range proof and pseudo_output_commitments.
+        // This ensures that they are signed by each RingMLSAG.
+        let range_proof_bytes = range_proof.to_bytes();
+        let extended_message = extend_message(message, &pseudo_output_commitments, &range_proof_bytes);
+
+        Ok(SignatureData {
+            extended_message,
+            pseudo_output_blindings,
+            pseudo_output_commitments,
+            range_proof_bytes,
+        })
     }
 
     /// Verify.
@@ -227,103 +367,22 @@ fn sign_with_balance_check<CSPRNG: RngCore + CryptoRng>(
     check_value_is_preserved: bool,
     rng: &mut CSPRNG,
 ) -> Result<SignatureRctBulletproofs, Error> {
-    if rings.is_empty() {
-        return Err(Error::NoInputs);
-    }
+    let secrets: Vec<(u64, Scalar)> = input_secrets
+        .iter()
+        .map(|(_, value, blinding)| (*value, *blinding))
+        .collect();
+
+    let signing_data = SignatureRctBulletproofs::get_signing_data(
+        message,
+        rings,
+        real_input_indices,
+        &secrets,
+        output_values_and_blindings,
+        fee,
+        check_value_is_preserved,
+        rng)?;
+
     let num_inputs = rings.len();
-    let ring_size = rings[0].len();
-    if ring_size == 0 {
-        return Err(Error::InvalidRingSize(0));
-    }
-
-    // Each ring must have the same size.
-    for ring in rings {
-        if ring.len() != ring_size {
-            return Err(Error::InvalidRingSize(ring.len()));
-        }
-    }
-
-    // `input_secrets` must contain an element for each input.
-    if input_secrets.len() != num_inputs {
-        return Err(Error::InvalidInputSecretsSize(input_secrets.len()));
-    }
-
-    // Each `real_input_index` must be in [0,ring_size - 1].
-    for i in real_input_indices {
-        if *i >= ring_size {
-            return Err(Error::IndexOutOfBounds);
-        }
-    }
-
-    // Blindings for pseudo_outputs. All but the last are random.
-    // Constructing blindings in this way ensures that sum_of_outputs -
-    // sum_of_pseudo_outputs = 0 if the sum of outputs and the sum of
-    // pseudo_outputs have equal value.
-    let mut pseudo_output_blindings: Vec<Scalar> = Vec::new();
-    for _i in 0..num_inputs - 1 {
-        pseudo_output_blindings.push(Scalar::random(rng));
-    }
-    // The implicit fee output is ommitted because its blinding is zero.
-    let sum_of_output_blindings: Scalar = output_values_and_blindings
-        .iter()
-        .map(|(_, blinding)| blinding)
-        .sum();
-
-    let sum_of_pseudo_output_blindings: Scalar = pseudo_output_blindings.iter().sum();
-    let last_blinding: Scalar = sum_of_output_blindings - sum_of_pseudo_output_blindings;
-    pseudo_output_blindings.push(last_blinding);
-
-    // Create Range proofs for outputs and pseudo-outputs.
-    let pseudo_output_values_and_blindings: Vec<(u64, Scalar)> = input_secrets
-        .iter()
-        .zip(pseudo_output_blindings.iter())
-        .map(|((_, value, _), blinding)| (*value, *blinding))
-        .collect();
-
-    let (range_proof, commitments) = {
-        let values_and_blindings: Vec<(u64, Scalar)> = pseudo_output_values_and_blindings
-            .iter()
-            .chain(output_values_and_blindings.iter())
-            .map(|(value, blinding)| (*value, *blinding))
-            .collect();
-
-        // The implicit fee output is omitted from the range proof because it is known.
-
-        let (values, blindings): (Vec<_>, Vec<_>) = values_and_blindings.into_iter().unzip();
-        generate_range_proofs(&values, &blindings, rng).map_err(|_e| Error::RangeProofError)?
-    };
-
-    if check_value_is_preserved {
-        let sum_of_output_commitments: RistrettoPoint = output_values_and_blindings
-            .iter()
-            .map(|(value, blinding)| GENERATORS.commit(Scalar::from(*value), *blinding))
-            .sum();
-
-        let sum_of_pseudo_output_commitments: RistrettoPoint = pseudo_output_values_and_blindings
-            .iter()
-            .map(|(value, blinding)| GENERATORS.commit(Scalar::from(*value), *blinding))
-            .sum();
-
-        // The implicit fee output.
-        let fee_commitment = GENERATORS.commit(Scalar::from(fee), *FEE_BLINDING);
-
-        let difference =
-            sum_of_output_commitments + fee_commitment - sum_of_pseudo_output_commitments;
-        if difference != GENERATORS.commit(Scalar::zero(), Scalar::zero()) {
-            return Err(Error::ValueNotConserved);
-        }
-    }
-
-    let pseudo_output_commitments: Vec<CompressedCommitment> = commitments
-        .iter()
-        .take(num_inputs)
-        .map(CompressedCommitment::from)
-        .collect();
-
-    // Extend the message with the range proof and pseudo_output_commitments.
-    // This ensures that they are signed by each RingMLSAG.
-    let range_proof_bytes = range_proof.to_bytes();
-    let extended_message = extend_message(message, &pseudo_output_commitments, &range_proof_bytes);
 
     // Prove that the signer is allowed to spend a public key in each ring, and that
     // the input's value equals the value of the pseudo_output.
@@ -332,13 +391,13 @@ fn sign_with_balance_check<CSPRNG: RngCore + CryptoRng>(
         let real_index = real_input_indices[i];
         let (onetime_private_key, value, blinding) = input_secrets[i];
         let ring_signature = RingMLSAG::sign(
-            &extended_message,
+            &signing_data.extended_message,
             &rings[i],
             real_index,
             &onetime_private_key,
             value,
             &blinding,
-            &pseudo_output_blindings[i],
+            &signing_data.pseudo_output_blindings[i],
             rng,
         )?;
         ring_signatures.push(ring_signature);
@@ -346,8 +405,8 @@ fn sign_with_balance_check<CSPRNG: RngCore + CryptoRng>(
 
     Ok(SignatureRctBulletproofs {
         ring_signatures,
-        pseudo_output_commitments,
-        range_proof_bytes,
+        pseudo_output_commitments: signing_data.pseudo_output_commitments,
+        range_proof_bytes: signing_data.range_proof_bytes,
     })
 }
 

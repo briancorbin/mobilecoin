@@ -12,7 +12,7 @@ use mc_connection::{
     BlockchainConnection, ConnectionManager, RetryableBlockchainConnection,
     RetryableUserTxConnection, UserTxConnection,
 };
-use mc_crypto_keys::RistrettoPublic;
+use mc_crypto_keys::{RistrettoPrivate, RistrettoPublic, CompressedRistrettoPublic};
 use mc_crypto_rand::{CryptoRng, RngCore};
 use mc_fog_report_validation::FogPubkeyResolver;
 use mc_ledger_db::{Error as LedgerError, Ledger, LedgerDB};
@@ -20,7 +20,7 @@ use mc_transaction_core::{
     constants::{MAX_INPUTS, MILLIMOB_TO_PICOMOB, RING_SIZE},
     onetime_keys::recover_onetime_private_key,
     ring_signature::KeyImage,
-    tx::{Tx, TxOut, TxOutConfirmationNumber, TxOutMembershipProof},
+    tx::{Tx, TxOut, TxOutConfirmationNumber, TxOutMembershipProof, OutputsAndSharedSecrets, SerializableInputCredentials, UnsignedTx},
     BlockIndex,
 };
 use mc_transaction_std::{InputCredentials, TransactionBuilder};
@@ -284,6 +284,108 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
         log::trace!(logger, "Tx constructed, hash={}", tx_proposal.tx.tx_hash());
 
         Ok(tx_proposal)
+    }
+
+    pub fn build_unsigned_transaction(
+        &self,
+        view_private_key: RistrettoPrivate,
+        change_address: PublicAddress,
+        inputs: &[UnspentTxOut],
+        outlays: &[Outlay],
+        opt_fee: u64,
+        opt_tombstone: u64,
+    ) -> Result<UnsignedTx, Error> {
+        let logger = self.logger.new(o!("outlays" => format!("{:?}", outlays)));
+        log::trace!(logger, "Building pending transaction...");
+
+        // Must have at least one output
+        if outlays.is_empty() {
+            return Err(Error::TxBuildError(
+                "Must have at least one destination".into(),
+            ));
+        }
+
+        // Figure out total amount of transaction (excluding fee).
+        let total_value: u64 = outlays.iter().map(|outlay| outlay.value).sum();
+        log::trace!(
+            logger,
+            "Total transaction value excluding fees: {}",
+            total_value
+        );
+
+        // Figure out the fee (involves network round-trips to consensus, unless
+        // opt_fee is non-zero
+        let fee = get_fee(&self.peer_manager, opt_fee);
+
+        // Select the UTXOs to be used for this transaction.
+        let selected_utxos =
+            Self::select_utxos_for_value(inputs, total_value + fee, MAX_INPUTS as usize)?;
+        log::trace!(
+            logger,
+            "Selected {} utxos ({:?})",
+            selected_utxos.len(),
+            selected_utxos,
+        );
+
+        // Figure out total amount of transaction (excluding fee).
+        let total_value: u64 = selected_utxos.iter().map(|utxo| utxo.value).sum();
+        log::trace!(
+            logger,
+            "Total transaction value excluding fees: {}",
+            total_value
+        );
+
+        // The selected_utxos with corresponding proofs of membership.
+        let selected_utxos_with_proofs: Vec<(UnspentTxOut, TxOutMembershipProof)> = {
+            let outputs: Vec<TxOut> = selected_utxos
+                .iter()
+                .map(|utxo| utxo.tx_out.clone())
+                .collect();
+            let proofs = self.get_membership_proofs(&outputs)?;
+
+            selected_utxos.into_iter().zip(proofs.into_iter()).collect()
+        };
+        log::trace!(logger, "Got membership proofs");
+
+        // Get rings.
+        // TODO configurable ring size
+        let excluded_tx_out_indices: Vec<u64> = selected_utxos_with_proofs
+            .iter()
+            .map(|(_, proof)| proof.index)
+            .collect();
+
+        let rings = self.get_rings(
+            DEFAULT_RING_SIZE,
+            selected_utxos_with_proofs.len(),
+            &excluded_tx_out_indices,
+        )?;
+        log::trace!(logger, "Got {} rings", rings.len());
+
+        // Come up with tombstone block.
+        let tombstone_block = if opt_tombstone > 0 {
+            opt_tombstone
+        } else {
+            let num_blocks_in_ledger = self.ledger_db.num_blocks()?;
+            num_blocks_in_ledger + DEFAULT_NEW_TX_BLOCK_ATTEMPTS
+        };
+        log::trace!(logger, "Tombstone block set to {}", tombstone_block);
+
+        // Build and return the TxProposal object
+        let mut rng = rand::thread_rng();
+        let unsigned_tx = Self::build_unsigned_tx(
+            &selected_utxos_with_proofs,
+            rings,
+            fee,
+            view_private_key,
+            change_address,
+            outlays,
+            tombstone_block,
+            &self.fog_resolver_factory,
+            &mut rng,
+            &self.logger,
+        )?;
+
+        Ok(unsigned_tx)
     }
 
     /// Create a TxProposal that attempts to merge multiple UTXOs into a single
@@ -934,6 +1036,191 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
             outlays: destinations.to_vec(),
             tx,
             outlay_index_to_tx_out_index,
+            outlay_confirmation_numbers,
+        })
+    }
+
+    /// Build unsigned tx
+    fn build_unsigned_tx(
+        inputs: &[(UnspentTxOut, TxOutMembershipProof)],
+        rings: Vec<Vec<(TxOut, TxOutMembershipProof)>>,
+        fee: u64,
+        view_private_key: RistrettoPrivate,
+        change_address: PublicAddress,
+        destinations: &[Outlay],
+        tombstone_block: BlockIndex,
+        fog_resolver_factory: &Arc<dyn Fn(&[FogUri]) -> Result<FPR, String> + Send + Sync>,
+        rng: &mut (impl RngCore + CryptoRng),
+        logger: &Logger,
+    ) -> Result<UnsignedTx, Error> {
+        // Check that number of rings matches number of inputs.
+        if rings.len() != inputs.len() {
+            let err = format!(
+                "rings/inputs mismatch: {:?} rings but {:?} inputs.",
+                rings.len(),
+                inputs.len()
+            );
+            log::error!(logger, "{}", err);
+            return Err(Error::TxBuildError(err));
+        }
+
+        // Check that we have at least one destination.
+        if destinations.is_empty() {
+            return Err(Error::TxBuildError(
+                "Must have at least one destination".into(),
+            ));
+        }
+
+        // Collect all required FogUris from public addresses, then pass to resolver
+        // factory
+        let fog_resolver = {
+            let fog_uris = core::slice::from_ref(&change_address)
+                .iter()
+                .chain(destinations.iter().map(|x| &x.receiver))
+                .filter_map(|x| extract_fog_uri(x).transpose())
+                .collect::<Result<Vec<_>, _>>()?;
+            fog_resolver_factory(&fog_uris).map_err(Error::FogError)?
+        };
+
+        // Create tx_builder.
+        let mut tx_builder = TransactionBuilder::new(fog_resolver);
+
+        // Unzip each vec of tuples into a tuple of vecs.
+        let mut rings_and_proofs: Vec<(Vec<TxOut>, Vec<TxOutMembershipProof>)> = rings
+            .into_iter()
+            .map(|tuples| tuples.into_iter().unzip())
+            .collect();
+
+        let mut input_credentials: Vec<InputCredentials> = Vec::new();
+        // Add inputs to the tx.
+        for (utxo, proof) in inputs {
+            let (mut ring, mut membership_proofs) = rings_and_proofs
+                .pop()
+                .ok_or_else(|| Error::TxBuildError("rings_and_proofs was empty".to_string()))?;
+            assert_eq!(
+                ring.len(),
+                membership_proofs.len(),
+                "Each ring element must have a corresponding membership proof."
+            );
+
+            // Add the input to the ring.
+            let position_opt = ring.iter().position(|tx_out| *tx_out == utxo.tx_out);
+            let real_key_index = match position_opt {
+                Some(position) => {
+                    // The input is already present in the ring.
+                    // This could happen if ring elements are sampled randomly from the ledger.
+                    position
+                }
+                None => {
+                    // The input is not already in the ring.
+                    if ring.is_empty() {
+                        // Append the input and its proof of membership.
+                        ring.push(utxo.tx_out.clone());
+                        membership_proofs.push(proof.clone());
+                    } else {
+                        // Replace the first element of the ring.
+                        ring[0] = utxo.tx_out.clone();
+                        membership_proofs[0] = proof.clone();
+                    }
+                    // The real input is always the first element. This is safe because TransactionBuilder
+                    // sorts each ring.
+                    0
+                }
+            };
+
+            assert_eq!(
+                ring.len(),
+                membership_proofs.len(),
+                "Each ring element must have a corresponding membership proof."
+            );
+
+            // here we set dummy onetime_private_key
+            let dummy: [u8; 32] = [0; 32];
+            let dummy_onetime_private_key = RistrettoPrivate::try_from(&dummy).unwrap();
+
+            input_credentials.push(
+                InputCredentials::new(
+                    ring,
+                    membership_proofs,
+                    real_key_index,
+                    dummy_onetime_private_key,
+                    view_private_key,
+                )
+                    .map_err(|_| Error::TxBuildError("failed creating InputCredentials".into()))?,
+            );
+        }
+
+        // Add outputs to our destinations.
+        let mut total_value = 0;
+        let mut tx_out_to_outlay_index = HashMap::default();
+        let mut outlay_confirmation_numbers = Vec::default();
+        for (i, outlay) in destinations.iter().enumerate() {
+            let (tx_out, confirmation_number) = tx_builder
+                .add_output(
+                    outlay.value,
+                    &outlay.receiver,
+                    rng,
+                )
+                .map_err(|err| Error::TxBuildError(format!("failed adding output: {}", err)))?;
+
+            tx_out_to_outlay_index.insert(tx_out, i);
+            outlay_confirmation_numbers.push(confirmation_number.to_vec());
+
+            total_value += outlay.value;
+        }
+
+        // Figure out if we have change.
+        let input_value = inputs
+            .iter()
+            .fold(0, |acc, (utxo, _proof)| acc + utxo.value);
+        if total_value > input_value {
+            return Err(Error::InsufficientFunds);
+        }
+        let change = input_value - total_value - tx_builder.fee;
+
+        // If we do, add an output for that as well.
+        if change > 0 {
+            let change_public_address = change_address;
+
+            let (_tx_out, confirmation_number) = tx_builder
+                .add_output(
+                    change,
+                    &change_public_address,
+                    rng,
+                )
+                .map_err(|err| {
+                    Error::TxBuildError(format!("failed adding output (change): {}", err))
+                })?;
+
+            outlay_confirmation_numbers.push(confirmation_number.to_vec());
+        }
+
+        let outputs_and_shared_secrets: Vec<OutputsAndSharedSecrets> = tx_builder
+            .outputs_and_shared_secrets
+            .iter()
+            .map(|(tx_out, ristretto_public)| OutputsAndSharedSecrets {
+                tx_out: tx_out.clone(),
+                ristretto_public: CompressedRistrettoPublic::from(ristretto_public.clone()),
+            })
+            .collect();
+
+        let serializable_input_credentials: Vec<SerializableInputCredentials> = input_credentials
+            .iter()
+            .map(|input| SerializableInputCredentials {
+                ring: input.ring.clone(),
+                membership_proofs: input.membership_proofs.clone(),
+                real_index: input.real_index.clone() as u64,
+                onetime_private_key: input.onetime_private_key.clone(),
+                real_output_public_key: CompressedRistrettoPublic::from(input.real_output_public_key.clone()),
+                view_private_key: input.view_private_key.clone(),
+            })
+            .collect();
+
+        Ok(UnsignedTx {
+            input_credentials: serializable_input_credentials,
+            outputs_and_shared_secrets,
+            tombstone_block,
+            fee,
             outlay_confirmation_numbers,
         })
     }

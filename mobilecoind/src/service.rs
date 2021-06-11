@@ -222,6 +222,11 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
         let account_key = AccountKey::try_from(proto_account_key)
             .map_err(|err| rpc_internal_error("account_key.try_from", err, &self.logger))?;
 
+        let spend_public_key = RistrettoPublic::try_from(request.get_spend_public_key())
+            .map_err(|err| rpc_internal_error("RistrettoPublic.try_from", err, &self.logger))?;
+
+        let compressed = CompressedRistrettoPublic::from(&spend_public_key);
+
         // Populate a new `MonitorData` instance.
         let data = MonitorData::new(
             account_key,
@@ -229,6 +234,8 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
             request.num_subaddresses,
             request.first_block,
             &request.name,
+            request.only_public,
+            compressed
         )
         .map_err(|err| rpc_internal_error("monitor_data.new", err, &self.logger))?;
 
@@ -872,6 +879,84 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
         // Success.
         let mut response = mc_mobilecoind_api::GenerateTxResponse::new();
         response.set_tx_proposal((&tx_proposal).into());
+        Ok(response)
+    }
+
+    fn generate_unsigned_tx_impl(
+        &mut self,
+        request: mc_mobilecoind_api::GenerateUnsignedTxRequest,
+    ) -> Result<mc_mobilecoind_api::GenerateUnsignedTxResponse, RpcStatus> {
+        // Get view private key
+        let view_private_key = request.view_private_key.as_ref()
+            .ok_or(mc_crypto_keys::KeyError::LengthMismatch(0, 32))
+            .and_then(|key| mc_crypto_keys::RistrettoPrivate::try_from(&key.data[..]))
+            .map_err(|err| rpc_internal_error("view_private_key.try_from", err, &self.logger))?;
+
+        // Get the list of potential inputs passed to.
+        let input_list: Vec<UnspentTxOut> = request
+            .get_input_list()
+            .iter()
+            .map(|proto_utxo| {
+                // Proto -> Rust struct conversion.
+                let utxo = UnspentTxOut::try_from(proto_utxo).map_err(|err| {
+                    rpc_internal_error("unspent_tx_out.try_from", err, &self.logger)
+                })?;
+
+                // Success.
+                Ok(utxo)
+            })
+            .collect::<Result<Vec<UnspentTxOut>, RpcStatus>>()?;
+
+        // Get the list of outlays.
+        let outlays: Vec<Outlay> = request
+            .get_outlay_list()
+            .iter()
+            .map(|outlay_proto| {
+                Outlay::try_from(outlay_proto)
+                    .map_err(|err| rpc_internal_error("outlay.try_from", err, &self.logger))
+            })
+            .collect::<Result<Vec<Outlay>, RpcStatus>>()?;
+
+        let change_address = PublicAddress::try_from(request.get_change_address())
+            .map_err(|err| rpc_internal_error("PublicAddress.try_from", err, &self.logger))?;
+
+        // Attempt to construct a transaction.
+        let tx_builder = self
+            .transactions_manager
+            .build_unsigned_transaction(
+                view_private_key,
+                change_address,
+                &input_list,
+                &outlays,
+                request.fee,
+                request.tombstone,
+            )
+            .map_err(|err| {
+                rpc_internal_error("transactions_manager.build_unsigned_transaction", err, &self.logger)
+            })?;
+
+        // Convert to protos.
+        let proto_inputs: Vec<mc_mobilecoind_api::external::SerializableInputCredentials> =
+            tx_builder.input_credentials.iter().map(|utxo| utxo.into()).collect();
+
+        let proto_outputs: Vec<mc_mobilecoind_api::external::OutputsAndSharedSecrets> =
+            tx_builder.outputs_and_shared_secrets.iter().map(|utxo| utxo.into()).collect();
+
+        // Success.
+        let mut unsigned_tx = mc_mobilecoind_api::external::UnsignedTx::new();
+        unsigned_tx.set_input_credentials(RepeatedField::from_vec(proto_inputs));
+        unsigned_tx.set_outputs_and_shared_secrets(RepeatedField::from_vec(proto_outputs));
+        unsigned_tx.set_fee((tx_builder.fee).into());
+        unsigned_tx.set_tombstone_block((tx_builder.tombstone_block).into());
+        unsigned_tx.set_outlay_confirmation_numbers(
+            tx_builder.outlay_confirmation_numbers
+                .iter()
+                .map(|val| val.to_vec())
+                .collect()
+        );
+
+        let mut response = mc_mobilecoind_api::GenerateUnsignedTxResponse::new();
+        response.set_unsigned_tx((unsigned_tx).into());
         Ok(response)
     }
 
@@ -1881,6 +1966,7 @@ build_api! {
     get_mixins GetMixinsRequest GetMixinsResponse get_mixins_impl,
     get_membership_proofs GetMembershipProofsRequest GetMembershipProofsResponse get_membership_proofs_impl,
     generate_tx GenerateTxRequest GenerateTxResponse generate_tx_impl,
+    generate_unsigned_tx GenerateUnsignedTxRequest GenerateUnsignedTxResponse generate_unsigned_tx_impl,
     generate_optimization_tx GenerateOptimizationTxRequest GenerateOptimizationTxResponse generate_optimization_tx_impl,
     generate_transfer_code_tx GenerateTransferCodeTxRequest GenerateTransferCodeTxResponse generate_transfer_code_tx_impl,
     generate_tx_from_tx_out_list GenerateTxFromTxOutListRequest GenerateTxFromTxOutListResponse generate_tx_from_tx_out_list_impl,
