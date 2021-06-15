@@ -178,6 +178,12 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
         }
     }
 
+    pub fn get_estimated_fee(
+        &self
+    ) -> u64 {
+        get_fee(&self.peer_manager, 0)
+    }
+
     /// Create a TxProposal.
     ///
     /// # Arguments
@@ -1084,6 +1090,8 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
 
         // Create tx_builder.
         let mut tx_builder = TransactionBuilder::new(fog_resolver);
+
+        tx_builder.set_fee(fee);
 
         // Unzip each vec of tuples into a tuple of vecs.
         let mut rings_and_proofs: Vec<(Vec<TxOut>, Vec<TxOutMembershipProof>)> = rings

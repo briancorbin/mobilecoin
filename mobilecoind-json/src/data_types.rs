@@ -58,6 +58,19 @@ impl From<&mc_mobilecoind_api::GenerateMnemonicResponse> for JsonMnemonicRespons
 }
 
 #[derive(Deserialize, Serialize, Default, Debug)]
+pub struct JsonFeeResponse {
+    pub fee: u64,
+}
+
+impl From<&mc_mobilecoind_api::GetFeeResponse> for JsonFeeResponse {
+    fn from(src: &mc_mobilecoind_api::GetFeeResponse) -> Self {
+        Self {
+            fee: src.fee,
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Default, Debug)]
 pub struct JsonAccountKeyResponse {
     pub view_private_key: String,
     pub spend_private_key: String,

@@ -353,6 +353,18 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
         Ok(response)
     }
 
+    fn get_estimated_fee_impl(
+        &mut self,
+        _request: mc_mobilecoind_api::Empty,
+    ) -> Result<mc_mobilecoind_api::GetFeeResponse, RpcStatus> {
+        let fee = self.transactions_manager.get_estimated_fee();
+
+        let mut response = mc_mobilecoind_api::GetFeeResponse::new();
+
+        response.set_fee(fee);
+        Ok(response)
+    }
+
     fn generate_mnemonic_impl(
         &mut self,
         _request: mc_mobilecoind_api::Empty,
@@ -1953,6 +1965,7 @@ build_api! {
     get_account_key_from_root_entropy GetAccountKeyFromRootEntropyRequest GetAccountKeyResponse get_account_key_from_root_entropy_impl,
     get_account_key_from_mnemonic GetAccountKeyFromMnemonicRequest GetAccountKeyResponse get_account_key_from_mnemonic_impl,
     get_public_address GetPublicAddressRequest GetPublicAddressResponse get_public_address_impl,
+    get_estimated_fee Empty GetFeeResponse get_estimated_fee_impl,
 
     // b58 codes
     parse_request_code ParseRequestCodeRequest ParseRequestCodeResponse parse_request_code_impl,

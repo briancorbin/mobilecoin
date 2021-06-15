@@ -114,6 +114,16 @@ fn mnemonic(state: rocket::State<State>) -> Result<Json<JsonMnemonicResponse>, S
     Ok(Json(JsonMnemonicResponse::from(&resp)))
 }
 
+/// get estimated fee
+#[get("/estimated-fee")]
+fn estimated_fee(state: rocket::State<State>) -> Result<Json<JsonFeeResponse>, String> {
+    let resp = state
+        .mobilecoind_api_client
+        .get_estimated_fee(&mc_mobilecoind_api::Empty::new())
+        .map_err(|err| format!("Failed getting estimated fee: {}", err))?;
+    Ok(Json(JsonFeeResponse::from(&resp)))
+}
+
 #[post("/account-key-from-mnemonic", format = "json", data = "<mnemonic>")]
 fn account_key_from_mnemonic(
     state: rocket::State<State>,
@@ -898,6 +908,7 @@ fn main() {
                 account_key_from_mnemonic,
                 add_monitor,
                 remove_monitor,
+                estimated_fee,
                 monitors,
                 monitor_status,
                 balance,

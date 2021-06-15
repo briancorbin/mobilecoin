@@ -67,6 +67,9 @@ service MobilecoindAPI {
     // Database encryption
     rpc SetDbPassword (SetDbPasswordRequest) returns (google.protobuf.Empty) {}
     rpc UnlockDb (UnlockDbRequest) returns (google.protobuf.Empty) {}
+
+    // Fees
+    rpc GetEstimatedFee (google.protobuf.Empty) returns (GetFeeResponse) {}
 }
 
 //*********************************
@@ -700,6 +703,11 @@ message GetBalanceRequest {
 message GetBalanceResponse {
     // Sum of all utxos associated with the requested monitor_id/subaddress_index.
     uint64 balance = 1;
+}
+
+message GetFeeResponse {
+    // Return current fee
+    uint64 fee = 1;
 }
 
 // Build and submit a simple payment and return any change to the Sender's subaddress.
