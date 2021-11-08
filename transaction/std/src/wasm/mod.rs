@@ -9,7 +9,8 @@ use mc_account_keys::{AccountKey, PublicAddress, RootIdentity};
 use mc_crypto_keys::{CompressedRistrettoPublic, RistrettoPrivate, RistrettoPublic};
 use mc_transaction_core::CompressedCommitment;
 use mc_transaction_core::ring_signature::{CurveScalar, KeyImage, RingMLSAG};
-use mc_transaction_core::tx::{TxOut, TxOutMembershipProof};
+use mc_transaction_core::tx::{Tx, TxOut, TxOutMembershipProof};
+use mc_transaction_core::validation::validate_signature;
 use mc_util_from_random::FromRandom;
 
 use crate::{InputCredentials, TransactionBuilder};
@@ -32,6 +33,26 @@ pub struct SingleKey {
 
     pub sub_view_public: String,
     pub sub_spend_public: String,
+}
+
+#[wasm_bindgen(js_name = verify_transaction)]
+pub fn verify_transaction(verify_js: JsValue) -> Result<bool, JsValue> {
+    let json_tx: JsonTx = verify_js
+        .into_serde()
+        .map_err(|e| JsValue::from(format!("Error parsing parameters: {}", e)))?;
+
+    let proto = mc_api::external::Tx::try_from(&json_tx)
+        .map_err(|err| format!("Failed to parse tx: {}", err))?;
+
+    let tx: Tx = Tx::try_from(&proto)
+        .map_err(|err| format!("Failed to parse tx: {}", err))?;
+
+    let mut rng = rand::thread_rng();
+
+    validate_signature(&tx, &mut rng)
+        .map_err(|err| format!("Failed to validate tx: {}", err))?;
+
+    Ok(true)
 }
 
 #[wasm_bindgen]

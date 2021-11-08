@@ -403,6 +403,42 @@ impl From<&mc_api::external::TxPrefix> for JsonTxPrefix {
     }
 }
 
+impl TryFrom<&JsonTxPrefix> for mc_api::external::TxPrefix {
+    type Error = String;
+
+    fn try_from(src: &JsonTxPrefix) -> Result<mc_api::external::TxPrefix, String> {
+        let mut inputs: Vec<mc_api::external::TxIn> = Vec::new();
+        for input in &src.inputs {
+            let p_input =
+                mc_api::external::TxIn::try_from(input).map_err(|err| format!("Could not get TxIn: {}", err))?;
+            inputs.push(p_input);
+        }
+
+        let mut outputs: Vec<mc_api::external::TxOut> = Vec::new();
+        for output in &src.outputs {
+            let p_output = mc_api::external::TxOut::try_from(output)
+                .map_err(|err| format!("Could not get TxOut: {}", err))?;
+            outputs.push(p_output);
+        }
+
+        let mut prefix = mc_api::external::TxPrefix::new();
+        prefix.set_inputs(RepeatedField::from_vec(inputs));
+        prefix.set_outputs(RepeatedField::from_vec(outputs));
+        prefix.set_fee(
+            src.fee
+                .parse::<u64>()
+                .map_err(|err| format!("Failed to parse u64 from fee: {}", err))?,
+        );
+        prefix.set_tombstone_block(
+            src.tombstone_block
+                .parse::<u64>()
+                .map_err(|err| format!("Failed to parse u64 from tombstone_block: {}", err))?,
+        );
+
+        Ok(prefix)
+    }
+}
+
 #[derive(Deserialize, Serialize, Default, Debug)]
 pub struct JsonTx {
     pub prefix: JsonTxPrefix,
@@ -415,6 +451,25 @@ impl From<&mc_api::external::Tx> for JsonTx {
             prefix: src.get_prefix().into(),
             signature: src.get_signature().into(),
         }
+    }
+}
+
+impl TryFrom<&JsonTx> for mc_api::external::Tx {
+    type Error = String;
+
+    fn try_from(src: &JsonTx) -> Result<mc_api::external::Tx, String> {
+        let mut tx = mc_api::external::Tx::new();
+
+        tx.set_prefix(
+            mc_api::external::TxPrefix::try_from(&src.prefix)
+                .map_err(|err| format!("Could not convert TxPrefix: {}", err))?,
+        );
+        tx.set_signature(
+            mc_api::external::SignatureRctBulletproofs::try_from(&src.signature)
+                .map_err(|err| format!("Could not convert signature: {}", err))?,
+        );
+
+        Ok(tx)
     }
 }
 
@@ -434,6 +489,32 @@ impl From<&mc_api::external::TxIn> for JsonTxIn {
                 .map(JsonTxOutMembershipProof::from)
                 .collect(),
         }
+    }
+}
+
+impl TryFrom<&JsonTxIn> for mc_api::external::TxIn {
+    type Error = String;
+
+    fn try_from(src: &JsonTxIn) -> Result<mc_api::external::TxIn, String> {
+        let mut outputs: Vec<mc_api::external::TxOut> = Vec::new();
+        for output in &src.ring {
+            let p_output = mc_api::external::TxOut::try_from(output)
+                .map_err(|err| format!("Could not get TxOut: {}", err))?;
+            outputs.push(p_output);
+        }
+
+        let mut proofs: Vec<mc_api::external::TxOutMembershipProof> = Vec::new();
+        for proof in &src.proofs {
+            let p_proof = mc_api::external::TxOutMembershipProof::try_from(proof)
+                .map_err(|err| format!("Could not get proof: {}", err))?;
+            proofs.push(p_proof);
+        }
+
+        let mut txin = mc_api::external::TxIn::new();
+        txin.set_ring(RepeatedField::from_vec(outputs));
+        txin.set_proofs(RepeatedField::from_vec(proofs));
+
+        Ok(txin)
     }
 }
 
@@ -459,6 +540,62 @@ impl From<&mc_api::external::SignatureRctBulletproofs> for JsonSignatureRctBulle
                 .collect(),
             range_proofs: hex::encode(src.get_range_proofs().to_vec()),
         }
+    }
+}
+
+impl TryFrom<&JsonSignatureRctBulletproofs> for mc_api::external::SignatureRctBulletproofs {
+    type Error = String;
+
+    fn try_from(src: &JsonSignatureRctBulletproofs) -> Result<mc_api::external::SignatureRctBulletproofs, String> {
+        let mut ring_sigs: Vec<mc_api::external::RingMLSAG> = Vec::new();
+        for sig in &src.ring_signatures {
+            let mut c_zero = mc_api::external::CurveScalar::new();
+            c_zero.set_data(
+                hex::decode(&sig.c_zero)
+                    .map_err(|err| format!("Could not decode from hex: {}", err))?,
+            );
+
+            let mut responses: Vec<mc_api::external::CurveScalar> = Vec::new();
+            for resp in &sig.responses {
+                let mut response = mc_api::external::CurveScalar::new();
+                response.set_data(
+                    hex::decode(resp)
+                        .map_err(|err| format!("Could not decode from hex: {}", err))?,
+                );
+                responses.push(response);
+            }
+
+            let mut key_image = mc_api::external::KeyImage::new();
+            key_image.set_data(
+                hex::decode(&sig.key_image)
+                    .map_err(|err| format!("Could not decode from hex: {}", err))?,
+            );
+
+            let mut ring_sig = mc_api::external::RingMLSAG::new();
+            ring_sig.set_c_zero(c_zero);
+            ring_sig.set_responses(RepeatedField::from_vec(responses));
+            ring_sig.set_key_image(key_image);
+
+            ring_sigs.push(ring_sig);
+        }
+
+        let mut commitments: Vec<mc_api::external::CompressedRistretto> = Vec::new();
+        for comm in &src.pseudo_output_commitments {
+            let mut compressed = mc_api::external::CompressedRistretto::new();
+            compressed.set_data(
+                hex::decode(&comm).map_err(|err| format!("Could not decode from hex: {}", err))?,
+            );
+            commitments.push(compressed);
+        }
+
+        let mut signature = mc_api::external::SignatureRctBulletproofs::new();
+        signature.set_ring_signatures(RepeatedField::from_vec(ring_sigs));
+        signature.set_pseudo_output_commitments(RepeatedField::from_vec(commitments));
+        let proofs_bytes = hex::decode(&src.range_proofs)
+            .map_err(|err| format!("Could not decode from hex: {}", err))?;
+        signature.set_range_proofs(proofs_bytes);
+
+        Ok(signature)
     }
 }
 
